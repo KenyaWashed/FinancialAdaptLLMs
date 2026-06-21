@@ -80,14 +80,16 @@ class Inferencer:
         if vocab_size is not None:
             invalid_target = targets >= vocab_size
             if invalid_target.any():
+                loss_mask = loss_mask[:, :, 1:]
                 loss_mask = loss_mask.masked_fill(invalid_target.squeeze(-1), 0)
                 targets = targets.clamp(max=vocab_size - 1)
+            else:
+                loss_mask = loss_mask[:, :, 1:]
+        else:
+            loss_mask = loss_mask[:, :, 1:]
 
         # (bsz, option_num, seq_len-1, vocab_size)
         logit_probs = torch.nn.functional.log_softmax(logits.float(), dim=-1)
-
-        # (bsz, option_num, seq_len-1)
-        loss_mask = loss_mask[:, :, 1:]
 
         # (bsz, option_num, seq_len-1,1), squeeze to (bsz, option_num, seq_len-1), loss mask to (bsz, option_num, answer_len)
         loss = - torch.gather(logit_probs, -1, targets).squeeze(-1) * loss_mask
