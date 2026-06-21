@@ -26,6 +26,7 @@ model:
   model_name: ${model_name}
   model_type: ${model_type}
   vocab_size: ${vocab_size}
+  max_seq_len: ${n_tokens}
   cache_dir: ${cache_dir}
   trust_remote_code: true
   model_parallel: ${model_parallel}

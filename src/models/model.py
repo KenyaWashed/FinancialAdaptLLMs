@@ -4,7 +4,19 @@ import torch.nn as nn
 
 def get_model(**kwargs):
     """Load HuggingFace pretrained model"""
-    if kwargs.pop("model_parallel")==True:
+    # Remove custom-only kwargs that are not valid for HF from_pretrained
+    custom_only = {
+        "vocab_size",
+        "max_seq_len",
+        "dim",
+        "n_heads",
+        "n_layers",
+        "mlp_ratio",
+        "n_latent_recursions",
+        "n_improvement_cycles",
+    }
+    kwargs = {k: v for k, v in kwargs.items() if k not in custom_only}
+    if kwargs.pop("model_parallel", False):
         model = AutoModelForCausalLM.from_pretrained(device_map="auto", **kwargs)
     else:
         model = AutoModelForCausalLM.from_pretrained(**kwargs)
