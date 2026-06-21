@@ -364,7 +364,13 @@ class TinyRecursiveModel(nn.Module):
             input_ids = torch.cat([input_ids, next_token], dim=1)
 
             if stopping_criteria is not None:
-                if stopping_criteria(input_ids, logits):
+                stop = stopping_criteria(input_ids, logits)
+                if isinstance(stop, torch.Tensor):
+                    if stop.numel() == 1:
+                        stop = bool(stop.item())
+                    else:
+                        stop = stop.all().item()
+                if stop:
                     break
 
         return input_ids
