@@ -71,6 +71,18 @@ class Inferencer:
         # (bsz, option_num, seq_len-1, 1)
         targets = input_ids[:, :, 1:].unsqueeze(-1)
 
+        vocab_size = None
+        if hasattr(self.model, 'vocab_size'):
+            vocab_size = self.model.vocab_size
+        elif hasattr(self.model, 'config') and hasattr(self.model.config, 'vocab_size'):
+            vocab_size = self.model.config.vocab_size
+
+        if vocab_size is not None:
+            invalid_target = targets >= vocab_size
+            if invalid_target.any():
+                loss_mask = loss_mask.masked_fill(invalid_target.squeeze(-1), 0)
+                targets = targets.clamp(max=vocab_size - 1)
+
         # (bsz, option_num, seq_len-1, vocab_size)
         logit_probs = torch.nn.functional.log_softmax(logits.float(), dim=-1)
 
