@@ -36,9 +36,7 @@ echo "MODEL_PARALLEL: ${MODEL_PARALLEL}"
 echo "N_GPU: ${N_GPU}"
 
 if [ ${MODEL_TYPE} == 'custom' ]; then
-    echo "Custom model detected; forcing single-GPU inference and disabling model_parallel."
-    MODEL_PARALLEL=false
-    N_GPU=1
+    echo "Custom model detected; proceeding. Ensure the custom model supports multi-GPU (DDP) when using N_GPU>1."
 fi
 
 if [ ${N_GPU} == '8' ]; then

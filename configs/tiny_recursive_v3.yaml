@@ -1,0 +1,29 @@
+# Tiny Recursive Model v3 - ~100M params configuration
+# Use with `scripts/inference.sh` or hydra overrides
+
+model_name: tiny_recursive
+model_type: custom
+vocab_size: 50000
+# Model size ~100M params (approx): dim=896, n_layers=4
+dim: 896
+n_heads: 14
+n_layers: 4
+mlp_ratio: 4
+max_seq_len: 2048
+n_latent_recursions: 8
+n_improvement_cycles: 4
+dropout: 0.1
+tie_embeddings: true
+model_parallel: false
+
+# I/O and runtime
+output_dir: /tmp/output
+res_dir: /tmp/res
+cache_dir: /tmp/cache
+
+# Dataset / tokenization defaults
+tokenizer_name: ${model_name}
+max_length: 2048
+generate_max_len: 100
+n_tokens: 2048
+add_bos_token: false

@@ -46,6 +46,9 @@ def get_custom_model(model_type, **kwargs):
             "max_seq_len",
             "n_latent_recursions",
             "n_improvement_cycles",
+            "dropout",
+            "tie_embeddings",
+            "use_checkpoint",
         }
         clean_kwargs = {k: v for k, v in kwargs.items() if k in supported_kwargs}
         clean_kwargs.setdefault("vocab_size", kwargs.get("vocab_size", 50000))
