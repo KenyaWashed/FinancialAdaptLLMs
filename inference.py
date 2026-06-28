@@ -194,15 +194,14 @@ class Inferencer:
         return data
 
 
-@hydra.main(config_path="configs", config_name="inference")
+@hydra.main(version_base=None, config_path="configs", config_name="inference")
 def main(cfg):
     logger.info(cfg)
 
     accelerator = Accelerator()
     # load model once and run for many tasks
     if cfg.model_type == 'custom' and cfg.model_parallel:
-        print('Warning: custom model does not support distributed model_parallel; forcing model_parallel=False.')
-        cfg.model_parallel = False
+        print('Custom model detected; running with model_parallel=True. Ensure the custom model supports DDP.')
 
     model = hu.instantiate(cfg.model).half()
     if cfg.model_type == "custom" or not cfg.model_parallel:

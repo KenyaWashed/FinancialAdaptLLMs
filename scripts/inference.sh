@@ -3,17 +3,23 @@ MODEL=$2
 ADD_BOS=$3
 MODEL_PARALLEL=$4
 N_GPU=$5
-MODEL_TYPE=${6:-huggingface}
-VOCAB_SIZE=${7:-50000}
+MODEL_TYPE=${6:-${MODEL_TYPE:-huggingface}}
+VOCAB_SIZE=${7:-${VOCAB_SIZE:-50000}}
 shift 6
 EXTRA_ARGS=()
 for arg in "$@"; do
     if [[ "$arg" == vocab_size=* ]]; then
         VOCAB_SIZE="${arg#vocab_size=}"
+    elif [[ "$arg" == model_type=* ]]; then
+        MODEL_TYPE="${arg#model_type=}"
     else
         EXTRA_ARGS+=("$arg")
     fi
  done
+if [ -z "$MODEL_TYPE" ]; then
+    echo "ERROR: MODEL_TYPE is required as the 6th positional argument or model_type=... override."
+    exit 1
+fi
 OUTPUT_DIR='/tmp/output/' # for saving the prediction files
 RES_DIR='/tmp/res/' # for saving the evaluation scores of each task
 CACHE_DIR='/tmp/cache' # for caching hf models and datasets
