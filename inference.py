@@ -115,7 +115,10 @@ class Inferencer:
                                                                 stop_str='\n', answer_start=answer_start)])
         assert option_num == 1
         with torch.no_grad():
-            res = self.model.generate(
+            model = self.model
+            if not hasattr(model, "generate"):
+                model = self.accelerator.unwrap_model(model)
+            res = model.generate(
                 input_ids=input_ids.squeeze(1),  # remove the dim of option_num
                 attention_mask=input_atten_mask.squeeze(1),
                 pad_token_id=self.dataset_reader.tokenizer.pad_token_id,

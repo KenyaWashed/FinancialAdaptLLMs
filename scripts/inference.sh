@@ -1,10 +1,11 @@
+set -euo pipefail
 DOMAIN=$1
 MODEL=$2
 ADD_BOS=$3
 MODEL_PARALLEL=$4
 N_GPU=$5
-MODEL_TYPE=${6:-${MODEL_TYPE:-huggingface}}
-VOCAB_SIZE=${7:-${VOCAB_SIZE:-50000}}
+MODEL_TYPE=${6:-huggingface}
+VOCAB_SIZE=${7:-50000}
 shift 6
 EXTRA_ARGS=()
 for arg in "$@"; do
@@ -15,7 +16,7 @@ for arg in "$@"; do
     else
         EXTRA_ARGS+=("$arg")
     fi
- done
+done
 if [ -z "$MODEL_TYPE" ]; then
     echo "ERROR: MODEL_TYPE is required as the 6th positional argument or model_type=... override."
     exit 1
