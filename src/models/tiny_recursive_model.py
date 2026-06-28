@@ -54,6 +54,47 @@ def apply_rotary_pos_emb(q, k, cos, sin):
     return q_embed, k_embed
 
 
+class DiffusionStepEmbedding(nn.Module):
+    """Diffusion-style step embedding for iterative latent refinement."""
+    def __init__(self, dim, max_steps=32):
+        super().__init__()
+        self.step_emb = nn.Embedding(max_steps, dim)
+        self.project = nn.Sequential(
+            nn.Linear(dim, dim * 4, bias=False),
+            nn.SiLU(),
+            nn.Linear(dim * 4, dim, bias=False),
+        )
+
+    def forward(self, step_index):
+        if step_index.dim() == 0:
+            step_index = step_index.unsqueeze(0)
+        emb = self.step_emb(step_index)
+        return self.project(emb)
+
+
+class NumericalProjector(nn.Module):
+    """Project numeric features into the latent dimension."""
+    def __init__(self, dim, input_features=1, hidden_dim=None):
+        super().__init__()
+        hidden_dim = hidden_dim or max(1, dim // 2)
+        self.projector = nn.Sequential(
+            nn.Linear(input_features, hidden_dim, bias=False),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, dim, bias=False),
+        )
+
+    def forward(self, numerical_values, numerical_mask=None):
+        if numerical_values is None:
+            return None
+        if numerical_values.dim() == 2:
+            numerical_values = numerical_values.unsqueeze(-1)
+        num_emb = self.projector(numerical_values.float())
+        if numerical_mask is not None:
+            numerical_mask = numerical_mask.unsqueeze(-1).to(dtype=num_emb.dtype)
+            num_emb = num_emb * numerical_mask
+        return num_emb
+
+
 class SwiGLU(nn.Module):
     """SwiGLU activation function with optional dropout"""
     def __init__(self, dim, hidden_dim, dropout=0.0):
@@ -154,28 +195,26 @@ class TinyRecursiveModel(nn.Module):
     Tiny Recursive Model for Text Generation
 
     Architecture based on TRM paper:
-    - Single tiny 2-layer network
-    - Recursive reasoning with latent z and prediction y
-    - Deep supervision across multiple improvement steps
+    - Wide, shallow base network for stable recursion
+    - Diffusion-inspired latent denoising
+    - Numerical injection for finance reasoning
 
     For text generation:
     - x: embedded input sequence (context)
     - y: current token predictions (embedded)
     - z: latent reasoning state
-
-    The model recursively improves its latent z, then updates y.
     """
     def __init__(
         self,
         vocab_size,
-        dim=256,
-        n_heads=8,
-        n_layers=2,
+        dim=768,
+        n_heads=12,
+        n_layers=4,
         mlp_ratio=4,
         max_seq_len=256,
-        n_latent_recursions=6,  # n in the paper
-        n_improvement_cycles=3,  # T in the paper
-        dropout=0.0,
+        n_latent_recursions=6,
+        n_improvement_cycles=3,
+        dropout=0.1,
         tie_embeddings=False,
         use_checkpoint=False,
     ):
@@ -185,14 +224,31 @@ class TinyRecursiveModel(nn.Module):
         self.max_seq_len = max_seq_len
         self.n_latent_recursions = n_latent_recursions
         self.n_improvement_cycles = n_improvement_cycles
+        self.noise_base = 0.08
 
         # Embeddings
         self.token_emb = nn.Embedding(vocab_size, dim)
         self.pos_emb = nn.Embedding(max_seq_len, dim)
         self.emb_dropout = nn.Dropout(dropout) if dropout and dropout > 0.0 else nn.Identity()
 
-        # Single tiny network (key insight: one network is better than two)
+        # Wide, shallow recursive network
         self.net = TinyRecursiveNetwork(dim, n_heads, n_layers, mlp_ratio, max_seq_len, dropout=dropout)
+
+        # Diffusion-inspired conditioning
+        self.step_embed = DiffusionStepEmbedding(dim, max_steps=32)
+        self.z_update = nn.Sequential(
+            nn.Linear(dim, dim, bias=False),
+            nn.SiLU(),
+            nn.Linear(dim, dim, bias=False),
+        )
+
+        # Numerical injection
+        self.numerical_projector = NumericalProjector(dim)
+        self.numerical_fuser = nn.Sequential(
+            nn.Linear(dim * 2, dim, bias=False),
+            nn.SiLU(),
+            nn.Linear(dim, dim, bias=False),
+        )
 
         # Projection layers for combining x, y, z
         self.combine_xyz = nn.Linear(dim * 3, dim, bias=False)
@@ -220,6 +276,9 @@ class TinyRecursiveModel(nn.Module):
             except Exception:
                 pass
 
+        params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print(f"Built TinyRecursiveModel with {params:,} trainable parameters")
+
     def _init_weights(self):
         for module in self.modules():
             if isinstance(module, nn.Linear):
@@ -237,46 +296,80 @@ class TinyRecursiveModel(nn.Module):
         pos = torch.arange(T, device=input_ids.device).unsqueeze(0)
         return self.emb_dropout(self.token_emb(input_ids[:, :T]) + self.pos_emb(pos))
 
-    def latent_recursion(self, x, y, z):
+    def latent_recursion(self, x, y, z, step, numerical_values=None, numerical_mask=None):
         """
-        Single recursion cycle:
-        1. Update z n times given (x, y, z)
-        2. Update y once given (y, z)
+        Single recursion cycle using diffusion-inspired latent denoising.
         """
-        # Latent reasoning: update z n times
-        for _ in range(self.n_latent_recursions):
-            combined = self.combine_xyz(torch.cat([x, y, z], dim=-1))
-            z = self.net(combined)
+        step_id = torch.full((x.size(0),), step, device=x.device, dtype=torch.long)
+        step_emb = self.step_embed(step_id).unsqueeze(1).expand(-1, x.size(1), -1)
 
-        # Refine prediction: update y given (y, z)
-        combined_yz = self.combine_yz(torch.cat([y, z], dim=-1))
+        if self.training and step < self.n_latent_recursions:
+            noise_scale = self.noise_base * (1.0 - step / max(1, self.n_latent_recursions))
+            z = z + torch.randn_like(z) * noise_scale
+
+        combined = self.combine_xyz(torch.cat([x, y, z], dim=-1)) + step_emb
+        z_pred = self.net(combined)
+        z = z + self.z_update(z_pred)
+
+        if numerical_values is not None:
+            num_emb = self.numerical_projector(numerical_values, numerical_mask)
+            if num_emb is not None:
+                z = z + self.numerical_fuser(torch.cat([z, num_emb], dim=-1))
+
+        combined_yz = self.combine_yz(torch.cat([y, z], dim=-1)) + step_emb
         y = self.net(combined_yz)
-
         return y, z
 
-    def deep_recursion(self, x, y, z, use_grad=True):
+    def deep_recursion(self, x, y, z, use_grad=True, numerical_values=None, numerical_mask=None):
         """
         Deep recursion with T improvement cycles.
         First T-1 cycles without gradients, last cycle with gradients.
         """
         if not use_grad:
-            # All cycles without gradients (inference)
             with torch.no_grad():
-                for _ in range(self.n_improvement_cycles):
-                    y, z = self.latent_recursion(x, y, z)
+                for step in range(self.n_improvement_cycles):
+                    y, z = self.latent_recursion(
+                        x,
+                        y,
+                        z,
+                        step,
+                        numerical_values=numerical_values,
+                        numerical_mask=numerical_mask,
+                    )
             return y.detach(), z.detach()
 
-        # T-1 cycles without gradients
         with torch.no_grad():
-            for _ in range(self.n_improvement_cycles - 1):
-                y, z = self.latent_recursion(x, y, z)
+            for step in range(self.n_improvement_cycles - 1):
+                y, z = self.latent_recursion(
+                    x,
+                    y,
+                    z,
+                    step,
+                    numerical_values=numerical_values,
+                    numerical_mask=numerical_mask,
+                )
 
-        # Last cycle with gradients
-        y, z = self.latent_recursion(x, y, z)
+        y, z = self.latent_recursion(
+            x,
+            y,
+            z,
+            self.n_improvement_cycles - 1,
+            numerical_values=numerical_values,
+            numerical_mask=numerical_mask,
+        )
 
         return y.detach(), z.detach(), self.output_head(y), self.halt_head(y.mean(dim=1))
 
-    def forward(self, input_ids, attention_mask=None, targets=None, n_supervision_steps=4, **kwargs):
+    def forward(
+        self,
+        input_ids,
+        attention_mask=None,
+        targets=None,
+        n_supervision_steps=4,
+        numerical_values=None,
+        numerical_mask=None,
+        **kwargs,
+    ):
         """
         Forward pass with deep supervision.
 
@@ -284,6 +377,8 @@ class TinyRecursiveModel(nn.Module):
             input_ids: [B, T] input token IDs
             attention_mask: optional [B, T] attention mask
             targets: [B, T] target token IDs (for training)
+            numerical_values: optional [B, T] or [B, T, K] numeric features
+            numerical_mask: optional [B, T] boolean mask for numeric values
             n_supervision_steps: number of deep supervision steps
 
         Returns:
@@ -299,39 +394,52 @@ class TinyRecursiveModel(nn.Module):
             attention_mask = attention_mask[:, :T].unsqueeze(-1).to(dtype=x.dtype, device=x.device)
             x = x * attention_mask
 
+        if numerical_values is not None:
+            numerical_values = numerical_values[:, :T]
+            if numerical_mask is not None:
+                numerical_mask = numerical_mask[:, :T]
+
         # Initialize y and z
         y = self.y_init.expand(B, T, -1).clone().to(dtype=x.dtype, device=x.device)
         z = self.z_init.expand(B, T, -1).clone().to(dtype=x.dtype, device=x.device)
 
         if targets is None:
-            # Inference: just run deep recursion
-            y, z = self.deep_recursion(x, y, z, use_grad=False)
+            y, z = self.deep_recursion(
+                x,
+                y,
+                z,
+                use_grad=False,
+                numerical_values=numerical_values,
+                numerical_mask=numerical_mask,
+            )
             return SimpleNamespace(logits=self.output_head(y))
 
-        # Ensure targets match input length
         targets = targets[:, :T].clamp(0, self.vocab_size - 1)
-
-        # Training with deep supervision
         total_loss = 0.0
 
         for step in range(n_supervision_steps):
-            y, z, logits, halt_logit = self.deep_recursion(x, y, z, use_grad=True)
+            y, z, logits, halt_logit = self.deep_recursion(
+                x,
+                y,
+                z,
+                use_grad=True,
+                numerical_values=numerical_values,
+                numerical_mask=numerical_mask,
+            )
 
-            # Cross-entropy loss for token prediction
             ce_loss = F.cross_entropy(
                 logits.view(-1, self.vocab_size),
                 targets.reshape(-1),
-                ignore_index=-100
+                ignore_index=-100,
             )
 
-            # Halting loss (simplified ACT)
             with torch.no_grad():
                 preds = logits.argmax(dim=-1)
                 mask = (targets != -100)
                 correct = ((preds == targets) & mask).float().sum() / mask.float().sum().clamp(min=1)
             halt_loss = F.binary_cross_entropy_with_logits(
                 halt_logit.squeeze(-1),
-                correct.expand(B)
+                correct.expand(B),
             )
 
             total_loss = total_loss + ce_loss + 0.1 * halt_loss
